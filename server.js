@@ -13,10 +13,14 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, "public")));
 
 // Connect to MongoDB
-mongoose.connect(process.env.MONGO_URI || "mongodb://localhost:27017/teleclean", {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-})
+mongoose.connect(
+    process.env.MONGO_URL ||
+    `mongodb://${process.env.MONGOUSER || process.env.MONGO_INITDB_ROOT_USERNAME}:${process.env.MONGOPASSWORD || process.env.MONGO_INITDB_ROOT_PASSWORD}@${process.env.MONGOHOST}:${process.env.MONGOPORT}/teleclean?authSource=admin`,
+    {
+        useNewUrlParser: true,
+        useUnifiedTopology: true,
+    }
+)
     .then(() => console.log("✅ MongoDB Connected"))
     .catch(err => console.error("❌ MongoDB Error:", err));
 
