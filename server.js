@@ -3,205 +3,419 @@ const express = require("express");
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 const path = require("path");
-
+const nodemailer = require("nodemailer");
+require("dotenv").config();
 const app = express();
 const PORT = process.env.PORT || 3000;
+mongoose.connect(process.env.MONGODB_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
+.then(() => console.log("✅ MongoDB connected successfully"))
+.catch((err) => console.error("❌ MongoDB connection error:", err));
+
 
 // Middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, "public")));
+app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+    next();
+});
 
-// Connect to MongoDB
-mongoose.connect(
-    process.env.MONGO_URL ||
-    `mongodb://${process.env.MONGOUSER || process.env.MONGO_INITDB_ROOT_USERNAME}:${process.env.MONGOPASSWORD || process.env.MONGO_INITDB_ROOT_PASSWORD}@${process.env.MONGOHOST}:${process.env.MONGOPORT}/teleclean?authSource=admin`,
-    {
-        useNewUrlParser: true,
-        useUnifiedTopology: true,
+
+
+
+// Email Transporter
+const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS
     }
-)
-    .then(() => console.log("✅ MongoDB Connected"))
-    .catch(err => console.error("❌ MongoDB Error:", err));
+});
 
-// User Schema
+// Schemas
 const userSchema = new mongoose.Schema({
     name: { type: String, required: true },
     email: { type: String, required: true, unique: true },
     password: { type: String, required: true },
-    role: { type: String, enum: ["cleaner", "householder"], required: true }, // Role: cleaner or householder
-    skills: { type: [String], default: [] }, // For cleaners (e.g., cleaning, window cleaning)
-    location: { type: String }, // For cleaners and householders
-    offers: [{ type: mongoose.Schema.Types.ObjectId, ref: "Offer" }], // For cleaners (their posted offers)
-    bookings: [{ type: mongoose.Schema.Types.ObjectId, ref: "Booking" }], // For householders (their booked services)
+    role: { type: String, enum: ["cleaner", "householder"], required: true },
+    skills: { type: [String], default: [] },
+    location: { type: String },
+    offers: [{ type: mongoose.Schema.Types.ObjectId, ref: "Offer" }],
+    pricePerHour: { type: Number }, 
+    bookings: [{ type: mongoose.Schema.Types.ObjectId, ref: "Booking" }]
 });
 
-const User = mongoose.model("User", userSchema);
-
-// Offer Schema
 const offerSchema = new mongoose.Schema({
     title: { type: String, required: true },
     description: { type: String, required: true },
     price: { type: Number, required: true },
     location: { type: String, required: true },
-    postedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" }, // Cleaner who posted the offer
-    status: { type: String, enum: ["available", "booked"], default: "available" }, // Offer status
+    postedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    status: { type: String, enum: ["available", "booked"], default: "available" }
 });
 
-const Offer = mongoose.model("Offer", offerSchema);
-
-// Booking Schema
 const bookingSchema = new mongoose.Schema({
-    offer: { type: mongoose.Schema.Types.ObjectId, ref: "Offer" }, // The offer being booked
-    bookedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" }, // Householder who booked the offer
-    date: { type: Date, default: Date.now }, // Booking date
-    status: { type: String, enum: ["pending", "completed"], default: "pending" }, // Booking status
+    offer: { type: mongoose.Schema.Types.ObjectId, ref: "Offer" },
+    bookedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    date: { type: Date, default: Date.now },
+    status: { type: String, enum: ["pending", "completed"], default: "pending" }
 });
 
+const orderSchema = new mongoose.Schema({
+    customerName: { type: String, required: true },
+    customerEmail: { type: String, required: true },
+    customerPhone: { type: String, required: true },
+    customerAddress: { type: String, required: true },
+    serviceType: { type: String, required: true },
+    numberOfRooms: { type: Number, required: true },
+    notes: { type: String },
+    pricePerHour: { type: Number, required: true },
+    estimatedHours: { type: Number, required: true },
+    totalPrice: { type: Number, required: true },
+    paymentMethod: { type: String, enum: ["cash", "card"], default: "cash" },
+    paymentStatus: { type: String, enum: ["pending", "paid", "failed"], default: "pending" },
+    status: { type: String, enum: ["new", "assigned", "in_progress", "completed"], default: "new" },
+    createdAt: { type: Date, default: Date.now },
+    assignedCleaner: { type: mongoose.Schema.Types.ObjectId, ref: "User" }
+});
+
+// Models
+const User = mongoose.model("User", userSchema);
+const Offer = mongoose.model("Offer", offerSchema);
 const Booking = mongoose.model("Booking", bookingSchema);
+const Order = mongoose.model("Order", orderSchema);
 
-// Serve static HTML files from the "views" folder
-app.get("/", (req, res) => {
-    res.sendFile(path.join(__dirname, "views", "index.html"));
-});
-
-app.get("/login", (req, res) => {
-    res.sendFile(path.join(__dirname, "views", "login.html"));
-});
-
-app.get("/signup", (req, res) => {
-    res.sendFile(path.join(__dirname, "views", "signup.html"));
-});
-
-// Fetch Cleaner's Posted Offers
-// Fetch Cleaner's Posted Offers
-app.get("/cleaner-profile/:id/offers", async (req, res) => {
-    const userId = req.params.id;
-
-    try {
-        const user = await User.findById(userId).populate("offers");
-        res.status(200).json({ offers: user.offers });
-    } catch (error) {
-        res.status(500).json({ message: "Error fetching offers" });
+// Utility Functions
+const calculateOrderDetails = (service, rooms) => {
+    let pricePerHour;
+    switch(service) {
+        case 'تنظيف المنزل': pricePerHour = 150; break;
+        case 'تنظيف السجاد': pricePerHour = 100; break;
+        case 'تنظيف النوافذ': pricePerHour = 80; break;
+        default: pricePerHour = 100;
     }
-});
-// Serve Cleaner Profile Page
-app.get("/cleaner-profile/:id", (req, res) => {
-    res.sendFile(path.join(__dirname, "views", "cleaner-profile.html"));
-});
+    const estimatedHours = Math.max(1, Math.ceil(rooms * 0.5));
+    const totalPrice = pricePerHour * estimatedHours;
+    return { pricePerHour, estimatedHours, totalPrice };
+};
 
-
-// Serve Householder Profile Page
-app.get("/householder-profile/:id", (req, res) => {
-    res.sendFile(path.join(__dirname, "views", "householder-profile.html"));
-});
-
-// Fetch Available Offers for Householder
-app.get("/api/householder-profile/:id/offers", async (req, res) => {
-    const userId = req.params.id;
-
+const sendEmail = async (to, subject, html) => {
     try {
-        // Fetch available offers from the database
-        const offers = await Offer.find({ status: "available" }).populate("postedBy");
-
-        // Send the offers as a JSON response
-        res.status(200).json({ offers });
+        await transporter.sendMail({
+            from: process.env.EMAIL_USER,
+            to,
+            subject,
+            html
+        });
     } catch (error) {
-        res.status(500).json({ message: "Error fetching offers" });
+        console.error("Email sending error:", error);
     }
+};
+
+// Static File Routes
+app.get("/", (req, res) => res.sendFile(path.join(__dirname, "views", "index.html")));
+app.get("/order-service", (req, res) => res.sendFile(path.join(__dirname, "views", "order-service.html")));
+app.get("/payment", (req, res) => res.sendFile(path.join(__dirname, "views", "payment.html")));
+app.get("/confirmation", (req, res) => res.sendFile(path.join(__dirname, "views", "confirmation.html")));
+app.get("/login", (req, res) => res.sendFile(path.join(__dirname, "views", "login.html")));
+app.get("/signup", (req, res) => res.sendFile(path.join(__dirname, "views", "signup.html")));
+app.get("/cleaner-profile/:id", (req, res) => res.sendFile(path.join(__dirname, "views", "cleaner-profile.html")));
+app.get("/householder-profile/:id", (req, res) => res.sendFile(path.join(__dirname, "views", "householder-profile.html")));
+app.get("/payment-method", (req, res) => {
+    res.sendFile(path.join(__dirname, "views", "payment-method.html"));
 });
 
-// Signup Route
+// API Routes
+// User Authentication
 app.post("/signup", async (req, res) => {
-    const { name, email, password, role, location } = req.body;
-
     try {
-        // Check if user already exists
-        const existingUser = await User.findOne({ email });
-        if (existingUser) {
-            return res.status(400).send("User already exists");
+        const { name, email, password, role, location } = req.body;
+        
+        if (await User.findOne({ email })) {
+            return res.status(400).json({ error: "User already exists" });
         }
 
-        // Hash the password
-        const hashedPassword = await bcrypt.hash(password, 10);
+        const user = new User({
+            name,
+            email,
+            password: await bcrypt.hash(password, 10),
+            role,
+            location
+        });
 
-        // Create a new user
-        const user = new User({ name, email, password: hashedPassword, role, location });
         await user.save();
-
-        res.status(201).send("User registered successfully");
+        res.status(201).json({ message: "User registered successfully" });
     } catch (error) {
-        res.status(500).send("Error registering user");
+        res.status(500).json({ error: "Error registering user" });
     }
 });
 
-// Login Route
 app.post("/login", async (req, res) => {
-    const { email, password } = req.body;
-
     try {
-        // Find the user by email
+        const { email, password } = req.body;
         const user = await User.findOne({ email });
-        if (!user) {
-            return res.status(400).json({ message: "Invalid credentials" });
+
+        if (!user || !(await bcrypt.compare(password, user.password))) {
+            return res.status(400).json({ error: "Invalid credentials" });
         }
 
-        // Check the password
-        const isPasswordValid = await bcrypt.compare(password, user.password);
-        if (!isPasswordValid) {
-            return res.status(400).json({ message: "Invalid credentials" });
-        }
+        const redirectUrl = user.role === "cleaner" 
+            ? `/cleaner-profile/${user._id}` 
+            : `/householder-profile/${user._id}`;
 
-        // Send the redirect URL based on role
-        if (user.role === "cleaner") {
-            res.status(200).json({ redirectUrl: `/cleaner-profile/${user._id}` });
-        } else if (user.role === "householder") {
-            res.status(200).json({ redirectUrl: `/householder-profile/${user._id}` });
-        }
+        res.json({ redirectUrl });
     } catch (error) {
-        res.status(500).json({ message: "Error logging in" });
+        res.status(500).json({ error: "Error logging in" });
     }
 });
-// Post Offer Route (Cleaners)
+
+// Submit Order endpoint - MODIFIED
+app.post("/submit-order", async (req, res) => {
+    try {
+        const { name, email, phone, address, service, rooms, notes } = req.body;
+        
+        // Validate required fields
+        if (!name || !email || !phone || !address || !service || !rooms) {
+            return res.status(400).json({ 
+                success: false,
+                error: 'الرجاء ملء جميع الحقول المطلوبة' 
+            });
+        }
+
+        // Calculate order details
+        const { pricePerHour, estimatedHours, totalPrice } = calculateOrderDetails(service, rooms);
+
+        // Create new order - FIXED paymentMethod to use default "cash"
+        const newOrder = new Order({
+            customerName: name,
+            customerEmail: email,
+            customerPhone: phone,
+            customerAddress: address,
+            serviceType: service,
+            numberOfRooms: rooms,
+            notes: notes || '',
+            pricePerHour,
+            estimatedHours,
+            totalPrice
+            // Let paymentMethod use the default "cash" value
+            // paymentStatus will use default "pending"
+        });
+
+        await newOrder.save();
+
+        // Send success response with CORRECTED redirectUrl
+        res.json({ 
+            success: true, 
+            orderId: newOrder._id,
+            redirectUrl: `/payment-method?orderId=${newOrder._id}`
+        });
+
+    } catch (error) {
+        console.error('Error submitting order:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'حدث خطأ أثناء معالجة طلبك' 
+        });
+    }
+});
+
+// Process Payment endpoint - FIXED
+// Update the process-payment endpoint
+app.post("/process-payment", async (req, res) => {
+    try {
+        const { orderId, paymentMethod, cardDetails, amount } = req.body;
+        
+        // Validate order exists
+        const order = await Order.findById(orderId);
+        if (!order) {
+            return res.status(404).json({ 
+                success: false,
+                error: "Order not found" 
+            });
+        }
+
+        // Validate payment amount matches order total
+        const orderTotal = order.totalPrice + ' ر.س'; // Match the format from client
+        if (amount && amount !== orderTotal) {
+            return res.status(400).json({
+                success: false,
+                error: "المبلغ لا يتطابق مع قيمة الطلب"
+            });
+        }
+
+        // Process payment based on method
+        if (paymentMethod === "card") {
+            // Validate card details
+            if (!cardDetails || !cardDetails.number || !cardDetails.expiry || !cardDetails.cvv) {
+                return res.status(400).json({
+                    success: false,
+                    error: "بيانات البطاقة غير مكتملة"
+                });
+            }
+
+            // In a real app, integrate with payment gateway here
+            // This is just a simulation
+            const paymentSuccess = simulateCardPayment(cardDetails, order.totalPrice);
+            
+            if (!paymentSuccess) {
+                return res.status(400).json({
+                    success: false,
+                    error: "رفضت عملية الدفع. يرجى التحقق من بيانات البطاقة"
+                });
+            }
+
+            order.paymentStatus = "paid";
+        } else {
+            order.paymentStatus = "pending";
+        }
+
+        order.paymentMethod = paymentMethod;
+        await order.save();
+
+        // Send confirmation email
+        await sendPaymentConfirmationEmail(order);
+
+        res.json({ 
+            success: true, 
+            redirectUrl: `/confirmation?orderId=${order._id}`,
+            message: "تمت عملية الدفع بنجاح"
+        });
+
+    } catch (error) {
+        console.error('Payment processing error:', error);
+        res.status(500).json({ 
+            success: false,
+            error: "حدث خطأ أثناء معالجة الدفع" 
+        });
+    }
+});
+
+// Helper function to simulate card payment
+function simulateCardPayment(cardDetails, amount) {
+    // Simple simulation - in reality you'd call a payment gateway
+    console.log(`Simulating payment of ${amount} with card ending in ${cardDetails.number.slice(-4)}`);
+    
+    // Simulate 80% success rate for demo purposes
+    return Math.random() > 0.2;
+}
+
+// Email sending function for payment confirmation
+async function sendPaymentConfirmationEmail(order) {
+    const subject = `تم تأكيد طلبك #${order._id}`;
+    const html = `
+        <div dir="rtl">
+            <h2>شكراً لاستخدامك تيلكلين</h2>
+            <p>تم تأكيد طلبك بنجاح وسيتم التواصل معك قريباً لتحديد الموعد.</p>
+            <h3>تفاصيل الطلب:</h3>
+            <ul>
+                <li>رقم الطلب: ${order._id}</li>
+                <li>نوع الخدمة: ${order.serviceType}</li>
+                <li>المبلغ: ${order.totalPrice} ر.س</li>
+                <li>طريقة الدفع: ${order.paymentMethod === 'card' ? 'بطاقة ائتمان' : 'نقداً عند الاستلام'}</li>
+            </ul>
+        </div>
+    `;
+    
+    await sendEmail(order.customerEmail, subject, html);
+}
+// Data Fetching Routes
+app.get("/api/orders/:orderId", async (req, res) => {
+    try {
+        const order = await Order.findById(req.params.orderId);
+        order ? res.json(order) : res.status(404).json({ error: "Order not found" });
+    } catch (error) {
+        res.status(500).json({ error: "Error fetching order" });
+    }
+});
+
+// أضف هذا قبل بدء الخادم
+app.get("/cleaner-signup", (req, res) => {
+    res.sendFile(path.join(__dirname, "views", "cleaner-signup.html"));
+});
+
+app.post("/api/cleaners", async (req, res) => {
+    try {
+        const { name, email, skills, price, location } = req.body;
+        
+        // تحقق من البريد الإلكتروني الموجود
+        if (await User.findOne({ email })) {
+            return res.status(400).json({ error: "البريد الإلكتروني مسجل مسبقًا" });
+        }
+
+        const newCleaner = new User({
+            name,
+            email,
+            role: "cleaner",
+            skills,
+            pricePerHour: price,
+            location,
+            password: "temp_password" // يمكنك إضافة نظام كلمات مرور لاحقًا
+        });
+
+        await newCleaner.save();
+        res.status(201).json({ message: "تم التسجيل بنجاح" });
+    } catch (error) {
+        res.status(500).json({ error: "خطأ في التسجيل" });
+    }
+});
+app.get("/cleaner-profile/:id/offers", async (req, res) => {
+    try {
+        const user = await User.findById(req.params.id).populate("offers");
+        res.json({ offers: user?.offers || [] });
+    } catch (error) {
+        res.status(500).json({ error: "Error fetching offers" });
+    }
+});
+
+app.get("/api/householder-profile/:id/offers", async (req, res) => {
+    try {
+        const offers = await Offer.find({ status: "available" }).populate("postedBy");
+        res.json({ offers });
+    } catch (error) {
+        res.status(500).json({ error: "Error fetching offers" });
+    }
+});
+
+// Offer Management
 app.post("/post-offer/:userId", async (req, res) => {
-    const { title, description, price, location } = req.body;
-    const userId = req.params.userId;
-
     try {
-        const offer = new Offer({ title, description, price, location, postedBy: userId });
+        const { title, description, price, location } = req.body;
+        const offer = new Offer({
+            title,
+            description,
+            price,
+            location,
+            postedBy: req.params.userId
+        });
+
         await offer.save();
-
-        // Add the offer to the cleaner's profile
-        await User.findByIdAndUpdate(userId, { $push: { offers: offer._id } });
-
-        res.status(201).send("Offer posted successfully");
+        await User.findByIdAndUpdate(req.params.userId, { $push: { offers: offer._id } });
+        res.status(201).json({ message: "Offer posted successfully" });
     } catch (error) {
-        res.status(500).send("Error posting offer");
+        res.status(500).json({ error: "Error posting offer" });
     }
 });
 
-// Book Offer Route (Householders)
 app.post("/book-offer/:offerId/:userId", async (req, res) => {
-    const { offerId, userId } = req.params;
-
     try {
-        // Create a booking
-        const booking = new Booking({ offer: offerId, bookedBy: userId });
+        const booking = new Booking({
+            offer: req.params.offerId,
+            bookedBy: req.params.userId
+        });
+
         await booking.save();
-
-        // Update the offer status to "booked"
-        await Offer.findByIdAndUpdate(offerId, { status: "booked" });
-
-        // Add the booking to the householder's profile
-        await User.findByIdAndUpdate(userId, { $push: { bookings: booking._id } });
-
-        res.status(201).send("Offer booked successfully");
+        await Offer.findByIdAndUpdate(req.params.offerId, { status: "booked" });
+        await User.findByIdAndUpdate(req.params.userId, { $push: { bookings: booking._id } });
+        res.status(201).json({ message: "Offer booked successfully" });
     } catch (error) {
-        res.status(500).send("Error booking offer");
+        res.status(500).json({ error: "Error booking offer" });
     }
 });
 
-// Start the server
-app.listen(PORT, () => {
-    console.log(`🚀 Server running on http://localhost:${PORT}`);
-});
+// Start Server
+app.listen(PORT, () => console.log(`🚀 Server running on http://localhost:${PORT}`));
